@@ -674,12 +674,35 @@ class FullScreenTUI {
       return;
     }
 
+    // Ctrl+V — paste from clipboard (Windows)
+    if (key === '\x16') {
+      try {
+        const { execSync } = require('child_process');
+        let clipboard = '';
+        if (process.platform === 'win32') {
+          clipboard = execSync('powershell -command "Get-Clipboard"', { encoding: 'utf-8', timeout: 3000 }).trim();
+        } else if (process.platform === 'darwin') {
+          clipboard = execSync('pbpaste', { encoding: 'utf-8', timeout: 3000 }).trim();
+        } else {
+          clipboard = execSync('xclip -selection clipboard -o 2>/dev/null || xsel --clipboard --output 2>/dev/null', { encoding: 'utf-8', timeout: 3000, shell: true }).trim();
+        }
+        if (clipboard) {
+          // Replace newlines with spaces for input line
+          const text = clipboard.replace(/[\r\n]+/g, ' ');
+          this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) + text + this.inputBuffer.slice(this.inputCursor);
+          this.inputCursor += text.length;
+          this.commandPaletteOpen = this.inputBuffer.startsWith('/');
+          this.render();
+        }
+      } catch {}
+      return;
+    }
+
     // Regular character or paste (multiple characters at once)
     if (key.length >= 1 && !key.startsWith('\x1b')) {
-      // Filter to printable characters only
-      const printable = key.split('').filter(c => c.charCodeAt(0) >= 32);
-      if (printable.length > 0) {
-        const text = printable.join('');
+      // Accept all printable characters (including UTF-8 multi-byte)
+      const text = key.replace(/[\x00-\x1f\x7f]/g, ''); // Strip control chars only
+      if (text.length > 0) {
         this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) + text + this.inputBuffer.slice(this.inputCursor);
         this.inputCursor += text.length;
 
