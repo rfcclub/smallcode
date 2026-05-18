@@ -1,0 +1,373 @@
+// SmallCode — TUI Commands
+// All /slash commands live here
+
+const fs = require('fs');
+const path = require('path');
+const tui = require('./tui');
+const chalk = tui.chalk;
+
+module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore) {
+
+  return async function handleCommand(cmd, rl) {
+    const parts = cmd.split(' ');
+
+    switch (parts[0]) {
+      case '/quit': case '/q': case '/exit':
+        rl.close();
+        return;
+
+      case '/clear':
+        conversationHistory.length = 0;
+        Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
+        console.log(chalk.green('  ✓ Session cleared.'));
+        console.log('');
+        rl.prompt();
+        return;
+
+      case '/model': {
+        if (parts.length < 2) {
+          // Show current model + fetch available models from endpoint
+          console.log(`  Current: ${chalk.cyan(config.model.name)}`);
+          console.log(`  Endpoint: ${chalk.gray(config.model.baseUrl)}`);
+          console.log('');
+          process.stdout.write(chalk.gray('  Fetching available models... '));
+          try {
+            const resp = await fetch(`${config.model.baseUrl}/models`);
+            if (resp.ok) {
+              const data = await resp.json();
+              const models = data.data || data.models || [];
+              console.log(chalk.green(`${models.length} found`));
+              console.log('');
+              for (const m of models) {
+                const id = m.id || m.name || '';
+                const active = id === config.model.name ? chalk.green(' ← active') : '';
+                console.log(`    ${chalk.white(id)}${active}`);
+              }
+              console.log('');
+              console.log(chalk.gray('  Switch: /model <name>'));
+            } else {
+              console.log(chalk.red('failed'));
+            }
+          } catch (e) {
+            console.log(chalk.red(`error: ${e.message}`));
+          }
+        } else {
+          const newModel = parts.slice(1).join(' ');
+          config.model.name = newModel;
+          console.log(`  ${chalk.green('✓')} Switched to ${chalk.cyan(newModel)}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/endpoint': {
+        if (parts.length < 2) {
+          console.log(`  Current: ${chalk.gray(config.model.baseUrl)}`);
+          console.log(chalk.gray('  Switch: /endpoint http://host:port/v1'));
+        } else {
+          config.model.baseUrl = parts[1];
+          console.log(`  ${chalk.green('✓')} Endpoint: ${chalk.gray(parts[1])}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/stats':
+        console.log(`  Model:    ${chalk.cyan(config.model.name)}`);
+        console.log(`  Endpoint: ${chalk.gray(config.model.baseUrl)}`);
+        console.log(`  History:  ${chalk.white(String(conversationHistory.length))} messages`);
+        console.log(`  Files:    ${chalk.white(String(Object.keys(improvementAttempts).filter(k => k !== '__bash').length))} tracked`);
+        console.log(`  Dir:      ${chalk.gray(process.cwd())}`);
+        console.log('');
+        rl.prompt();
+        return;
+
+      case '/diff': {
+        const { execSync } = require('child_process');
+        try {
+          const diff = execSync('git diff --stat', { encoding: 'utf-8', cwd: process.cwd() });
+          if (diff.trim()) {
+            console.log(chalk.bold('  Changes:'));
+            for (const line of diff.trim().split('\n')) {
+              console.log(`  ${line}`);
+            }
+          } else {
+            console.log(chalk.gray('  No uncommitted changes.'));
+          }
+        } catch {
+          console.log(chalk.gray('  Not a git repo.'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/git': {
+        const gitCmd = parts.slice(1).join(' ');
+        if (!gitCmd) {
+          console.log(chalk.gray('  /git status │ /git log │ /git diff │ /git commit -m "msg"'));
+          console.log('');
+          rl.prompt();
+          return;
+        }
+        const { execSync } = require('child_process');
+        try {
+          const output = execSync(`git ${gitCmd}`, { encoding: 'utf-8', cwd: process.cwd(), timeout: 10000 });
+          console.log(output);
+        } catch (e) {
+          console.log(chalk.red(`  ${e.stdout || e.stderr || e.message}`));
+        }
+        rl.prompt();
+        return;
+      }
+
+      case '/loop': {
+        const targetFile = parts[1];
+        if (!targetFile) {
+          console.log(chalk.gray('  Usage: /loop <filepath>'));
+          console.log('');
+          rl.prompt();
+          return;
+        }
+        const validation = runValidation(targetFile);
+        if (!validation) {
+          console.log(chalk.gray(`  No validator for ${targetFile}`));
+        } else if (validation.passed) {
+          console.log(`  ${chalk.green('✓')} ${targetFile} — no errors`);
+        } else {
+          console.log(tui.improvementLoop(validation.errors, 1, MAX_IMPROVE_ITERATIONS));
+          console.log('');
+          await runAgentLoop(`Fix these errors in ${targetFile}:\n${validation.errors.join('\n')}`, config);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/memory': {
+        // Use the same memoryStore instance the tools use (budget-aware-mcp SQLite store)
+        const sub = parts[1];
+        if (!sub || sub === 'list') {
+          try {
+            const stats = memoryStore.stats();
+            if (stats.total === 0) {
+              console.log(chalk.gray('  No memory stored. The model will save decisions/workflows/gotchas as it works.'));
+            } else {
+              console.log(chalk.bold(`  Project memory (${stats.total} objects):`));
+              const objects = memoryStore.all();
+              for (const o of objects) {
+                console.log(`    ${chalk.cyan(`[${o.type}]`)} ${chalk.white(o.title)} ${chalk.gray(`(${o.id})`)}`);
+              }
+            }
+          } catch (e) {
+            console.log(chalk.gray(`  Memory error: ${e.message}`));
+          }
+        } else if (sub === 'clear') {
+          try {
+            const objs = memoryStore.all();
+            for (const o of objs) memoryStore.forget(o.id);
+            console.log(chalk.green('  ✓ Memory cleared.'));
+          } catch (e) {
+            console.log(chalk.gray(`  Error: ${e.message}`));
+          }
+        } else {
+          console.log(chalk.gray('  /memory         List stored memory'));
+          console.log(chalk.gray('  /memory clear   Clear all memory'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/compact': {
+        if (conversationHistory.length > 10) {
+          const removed = conversationHistory.splice(0, conversationHistory.length - 6);
+          console.log(`  ${chalk.green('✓')} Removed ${removed.length} old messages, kept last 6.`);
+        } else {
+          console.log(chalk.gray(`  Short history (${conversationHistory.length} msgs), nothing to compact.`));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/escalation': {
+        if (!escalationEngine) {
+          console.log(chalk.gray('  Escalation engine not initialized.'));
+        } else if (!escalationEngine.enabled) {
+          console.log(chalk.gray('  Escalation: disabled'));
+          console.log(chalk.gray('  To enable, set ANTHROPIC_API_KEY or OPENAI_API_KEY env var'));
+          console.log(chalk.gray('  Or add [escalation] section to smallcode.toml'));
+        } else {
+          console.log(`  ${chalk.magenta('⬆')} Escalation: ${chalk.green('enabled')}`);
+          console.log(`  Provider: ${chalk.cyan(escalationEngine.provider)} (${escalationEngine.model})`);
+          console.log(`  Used: ${escalationEngine.escalationCount}/${escalationEngine.maxEscalationsPerSession} this session`);
+          console.log(`  Confirm: ${escalationEngine.confirmBeforeEscalate ? 'yes (will ask)' : 'no (auto)'}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/skill': {
+        const { SkillManager } = require('../src/plugins/skills');
+        const sm = new SkillManager(process.cwd());
+        const sub = parts[1];
+
+        if (!sub || sub === 'list') {
+          const skills = sm.list();
+          if (skills.length === 0) {
+            console.log(chalk.gray('  No skills defined.'));
+            console.log(chalk.gray('  Create one: /skill add <name>'));
+            console.log(chalk.gray('  Skills teach the model reusable behaviors.'));
+          } else {
+            console.log(chalk.bold(`  Skills (${skills.length}):`));
+            for (const s of skills) {
+              const trigger = s.trigger === 'auto' ? chalk.green('auto') : s.trigger === 'match' ? chalk.yellow('match') : chalk.gray('manual');
+              console.log(`    ${chalk.cyan(s.name)} [${trigger}] ${chalk.gray(s.preview)}`);
+            }
+          }
+        } else if (sub === 'use') {
+          const name = parts[2];
+          if (!name) { console.log(chalk.gray('  Usage: /skill use <name>')); }
+          else {
+            const skill = sm.get(name);
+            if (!skill) { console.log(chalk.red(`  Skill "${name}" not found.`)); }
+            else {
+              // Inject into conversation as a system message
+              conversationHistory.push({ role: 'system', content: `[Skill: ${skill.name}]\n${skill.content}` });
+              console.log(chalk.green(`  ✓ Skill "${skill.name}" activated for this conversation.`));
+            }
+          }
+        } else if (sub === 'add') {
+          const name = parts[2];
+          if (!name) { console.log(chalk.gray('  Usage: /skill add <name>')); }
+          else {
+            const content = parts.slice(3).join(' ') || 'Describe the skill behavior here.';
+            const skill = sm.add(name, content, { trigger: 'manual' });
+            console.log(chalk.green(`  ✓ Created skill "${name}" at ${skill.path}`));
+            console.log(chalk.gray('  Edit the .md file to customize the skill content.'));
+          }
+        } else if (sub === 'remove') {
+          const name = parts[2];
+          if (!name) { console.log(chalk.gray('  Usage: /skill remove <name>')); }
+          else {
+            const ok = sm.remove(name);
+            console.log(ok ? chalk.green(`  ✓ Removed "${name}"`) : chalk.red(`  Skill "${name}" not found.`));
+          }
+        } else {
+          console.log(chalk.gray('  /skill list          Show all skills'));
+          console.log(chalk.gray('  /skill use <name>    Activate a skill'));
+          console.log(chalk.gray('  /skill add <name>    Create a new skill'));
+          console.log(chalk.gray('  /skill remove <name> Delete a skill'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/plugin': {
+        const { PluginLoader } = require('../src/plugins/loader');
+        const pl = new PluginLoader(process.cwd()).loadAll();
+        const sub = parts[1];
+
+        if (!sub || sub === 'list') {
+          const plugins = pl.list();
+          if (plugins.length === 0) {
+            console.log(chalk.gray('  No plugins installed.'));
+            console.log(chalk.gray('  Add plugins to .smallcode/plugins/ or ~/.config/smallcode/plugins/'));
+          } else {
+            console.log(chalk.bold(`  Plugins (${plugins.length}):`));
+            for (const p of plugins) {
+              console.log(`    ${chalk.cyan(p.name)} v${p.version} — ${chalk.gray(p.description)}`);
+              if (p.tools.length) console.log(`      Tools: ${p.tools.join(', ')}`);
+              if (p.commands.length) console.log(`      Commands: ${p.commands.join(', ')}`);
+            }
+          }
+        } else {
+          console.log(chalk.gray('  /plugin list    Show installed plugins'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/undo': {
+        const { execSync } = require('child_process');
+        try {
+          const status = execSync('git status --porcelain', { encoding: 'utf-8', cwd: process.cwd() });
+          if (status.trim()) {
+            execSync('git checkout -- .', { encoding: 'utf-8', cwd: process.cwd() });
+            console.log(`  ${chalk.green('✓')} Reverted all uncommitted changes.`);
+          } else {
+            console.log(chalk.gray('  No changes to undo.'));
+          }
+        } catch {
+          console.log(chalk.red('  Not a git repo or no changes to undo.'));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/files': {
+        const { execSync } = require('child_process');
+        try {
+          const output = execSync('git ls-files', { encoding: 'utf-8', cwd: process.cwd() });
+          const files = output.trim().split('\n');
+          console.log(chalk.bold(`  Project files (${files.length}):`));
+          for (const f of files.slice(0, 30)) {
+            console.log(chalk.gray(`    ${f}`));
+          }
+          if (files.length > 30) console.log(chalk.gray(`    ... (${files.length - 30} more)`));
+        } catch {
+          const entries = fs.readdirSync(process.cwd()).slice(0, 20);
+          for (const e of entries) console.log(chalk.gray(`    ${e}`));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/help':
+        console.log('');
+        console.log(chalk.bold('  Commands'));
+        console.log(chalk.gray('  ─────────────────────────────────────'));
+        console.log(`  ${chalk.cyan('/model')} <name>  ${chalk.gray('Switch model mid-session')}`);
+        console.log(`  ${chalk.cyan('/endpoint')} <u>  ${chalk.gray('Switch API endpoint')}`);
+        console.log(`  ${chalk.cyan('/stats')}         ${chalk.gray('Model, history, cwd')}`);
+        console.log(`  ${chalk.cyan('/files')}         ${chalk.gray('List project files')}`);
+        console.log(`  ${chalk.cyan('/diff')}          ${chalk.gray('Git diff summary')}`);
+        console.log(`  ${chalk.cyan('/git')} <cmd>     ${chalk.gray('Run any git command')}`);
+        console.log(`  ${chalk.cyan('/loop')} <file>   ${chalk.gray('Validate + auto-fix')}`);
+        console.log(`  ${chalk.cyan('/memory')}        ${chalk.gray('View/manage project memory')}`);
+        console.log(`  ${chalk.cyan('/undo')}          ${chalk.gray('Revert uncommitted changes')}`);
+        console.log(`  ${chalk.cyan('/compact')}       ${chalk.gray('Trim conversation history')}`);
+        console.log(`  ${chalk.cyan('/escalation')}    ${chalk.gray('View model escalation status')}`);
+        console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
+        console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
+        console.log(`  ${chalk.cyan('/clear')}         ${chalk.gray('Reset entire session')}`);
+        console.log(`  ${chalk.cyan('/quit')}          ${chalk.gray('Exit SmallCode')}`);
+        console.log('');
+        rl.prompt();
+        return;
+
+      default: {
+        // Try plugin commands before showing "unknown"
+        const { PluginLoader } = require('../src/plugins/loader');
+        const pl = new PluginLoader(process.cwd()).loadAll();
+        if (pl.commands[parts[0]]) {
+          const result = await pl.executeCommand(parts[0], parts.slice(1).join(' '), { config, conversationHistory });
+          if (result) console.log(result);
+        } else {
+          console.log(chalk.gray(`  Unknown: ${parts[0]}. Type /help`));
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+    }
+  };
+};

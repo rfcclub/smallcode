@@ -1,0 +1,30 @@
+# Dev/test artifacts
+.stress-test/
+bench/
+venv/
+__pycache__/
+.code-graph/
+.memory/
+.smallcode/
+node_modules/
+
+# Build artifacts
+*.pyc
+*.pdb
+*.exe
+*.rmeta
+Cargo.lock
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Config
+.vscode/
+*.toml
+!smallcode.toml
+
+# Large files
+tower_defense.py
+core.marrow
+smallcode.marrow

@@ -1,0 +1,43 @@
+{
+  "name": "smallcode",
+  "version": "0.1.0",
+  "description": "AI coding agent optimized for small LLMs (≤20B parameters)",
+  "bin": {
+    "smallcode": "./bin/smallcode.js"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "start": "node bin/smallcode.js",
+    "dev": "node bin/smallcode.js",
+    "eval": "node bin/smallcode.js --eval classify_accuracy",
+    "mcp": "node bin/smallcode.js --mcp"
+  },
+  "dependencies": {
+    "bonescript-compiler": "github:Doorman11991/BoneScript#main",
+    "budget-aware-mcp": "github:Doorman11991/budget-aware-mcp#master",
+    "chalk": "^4.1.2",
+    "cli-highlight": "^2.1.11",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "llm",
+    "ollama",
+    "terminal",
+    "small-models",
+    "marrowscript",
+    "mcp"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "jest": "^30.4.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
