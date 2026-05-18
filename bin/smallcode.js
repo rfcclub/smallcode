@@ -254,6 +254,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '-v' || arg === '--version') flags.version = true;
   else if (arg === '-r' || arg === '--resume') flags.resume = true;
   else if (arg === '--mcp') flags.mcp = true;
+  else if (arg === '--acp') flags.acp = true;
   else if (arg === '--non-interactive') flags.nonInteractive = true;
   else if (arg === '--classic') flags.classic = true;
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
@@ -436,6 +437,12 @@ async function checkOllama(config) {
       if (models.length > 0) {
         console.log(`  Connected: ${baseUrl}`);
         console.log(`  Model: ${config.model.name}`);
+        // Auto-detect context window from model metadata
+        const activeModel = models.find(m => (m.id || m.name || '').includes(config.model.name)) || models[0];
+        if (activeModel && activeModel.context_length) {
+          config.context.detected_window = activeModel.context_length;
+          console.log(`  Context: ${activeModel.context_length} tokens`);
+        }
       }
       return true;
     } catch {
@@ -1295,6 +1302,15 @@ async function runAgentLoop(userMessage, config) {
   // Governor: classify task type (determines verification strategy)
   currentTaskType = classifyTask(userMessage);
 
+  // Multi-model routing: pick model based on task complexity (if configured)
+  if (config.models) {
+    const selectedModel = routeModel(userMessage, config);
+    if (selectedModel !== config.model.name) {
+      config.model.name = selectedModel;
+      if (_fullscreenRef) _fullscreenRef.addTool('router', 'ok', `→ ${selectedModel}`);
+    }
+  }
+
   // Auto-compact if history is getting long (protect small model context)
   if (conversationHistory.length > 30) {
     const removed = conversationHistory.splice(0, conversationHistory.length - 12);
@@ -1833,9 +1849,25 @@ ${getMemoryContext(messages)}${getSkillContext(messages)}${getPluginPrompts()}`
   };
 
   try {
+    // Transform messages with images into multimodal format
+    const { extractImages, formatImagesForAPI, modelSupportsVision } = require('../src/session/images');
+    const processedMessages = messages.map(msg => {
+      if (msg.role !== 'user' || typeof msg.content !== 'string') return msg;
+      const images = extractImages(msg.content, process.cwd());
+      if (images.length === 0 || !modelSupportsVision(config.model.name)) return msg;
+      // Convert to multimodal content array
+      return {
+        ...msg,
+        content: [
+          { type: 'text', text: msg.content },
+          ...formatImagesForAPI(images),
+        ],
+      };
+    });
+
     const body = {
       model: config.model.name,
-      messages: [systemMsg, ...messages],
+      messages: [systemMsg, ...processedMessages],
       tools: getAllTools(),
       temperature: 0.1,
       max_tokens: 4096,
@@ -2220,6 +2252,13 @@ async function main() {
 
   if (flags.mcp) {
     runMCP();
+    return;
+  }
+
+  if (flags.acp) {
+    const { ACPAdapter } = require('../src/adapters/acp');
+    const adapter = new ACPAdapter(runAgentLoop, config);
+    adapter.start();
     return;
   }
 
